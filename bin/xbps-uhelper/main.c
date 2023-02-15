@@ -46,6 +46,7 @@ usage(void)
 	    " -C --config <dir>                    Path to confdir (xbps.d)\n"
 	    " -d --debug                           Debug mode shown to stderr\n"
 	    " -r --rootdir <dir>                   Full path to rootdir\n"
+	    " -v --verbose                         Verbose messages\n"
 	    " -V --version                         Show XBPS verison\n"
 	    "\n"
 	    "MODE\n"
@@ -62,6 +63,7 @@ usage(void)
 	    " getversion <pkgver|dep...>           Prints version from patterns or pkgvers\n"
 	    " pkgmatch <pkgver> <dep>              Match pkgver against dependency\n"
 	    " real-version <pkgname...>            Prints version of installed real packages\n"
+	    " verify <pkgname...>                  Verify the signature of packages\n"
 	    " version <pkgname...>                 Prints version of installed packages\n"
 	    " getsystemdir                         Prints the system xbps.d directory\n"
 	    );
@@ -96,11 +98,12 @@ main(int argc, char **argv)
 		{ "config", required_argument, NULL, 'C' },
 		{ "debug", no_argument, NULL, 'd' },
 		{ "rootdir", required_argument, NULL, 'r' },
+		{ "verbose", no_argument, NULL, 'v' },
 		{ "version", no_argument, NULL, 'V' },
 		{ NULL, 0, NULL, 0 }
 	};
 
-	while ((c = getopt_long(argc, argv, "C:dr:V", longopts, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "C:dr:vV", longopts, NULL)) != -1) {
 		switch (c) {
 		case 'C':
 			confdir = optarg;
@@ -111,6 +114,9 @@ main(int argc, char **argv)
 			break;
 		case 'd':
 			flags |= XBPS_FLAG_DEBUG;
+			break;
+		case 'v':
+			flags |= XBPS_FLAG_VERBOSE;
 			break;
 		case 'V':
 			printf("%s\n", XBPS_RELVER);
@@ -133,7 +139,9 @@ main(int argc, char **argv)
 	    (strcmp(argv[0], "real-version") == 0) ||
 	    (strcmp(argv[0], "arch") == 0) ||
 	    (strcmp(argv[0], "fetch") == 0) ||
-	    (strcmp(argv[0], "getsystemdir") == 0)) {
+	    (strcmp(argv[0], "getsystemdir") == 0) ||
+	    (strcmp(argv[0], "verify") == 0)
+	    ) {
 		/*
 		* Initialize libxbps.
 		*/
@@ -374,6 +382,30 @@ main(int argc, char **argv)
 				printf("%s: file is identical with remote.\n", argv[i]);
 			} else {
 				rv = 0;
+			}
+		}
+	} else if (strcmp(argv[0], "verify") == 0) {
+		/* Verify the signature of packages */
+		if (argc < 2)
+			usage();
+
+		for (i = 1; i < argc; i++) {
+			xbps_dictionary_t pkgd = xbps_rpool_get_pkg(&xh, argv[i]);
+			printf("%s\n", argv[i]);
+			if (pkgd != NULL) {
+				char path[PATH_MAX];
+				const char *url = NULL;
+				const char *pkgver = NULL;
+				const char *arch = NULL;
+				xbps_dictionary_get_cstring_nocopy(pkgd, "pkgver", &pkgver);
+				xbps_dictionary_get_cstring_nocopy(pkgd, "architecture", &arch);
+				// TODO
+				snprintf(path, sizeof(path), "/var/cache/xbps/%s.%s.xbps", pkgver, arch);
+				if (xbps_dictionary_get_cstring_nocopy(pkgd, "repository", &url)) {
+					struct xbps_repo *repo = xbps_rpool_get_repo(url);
+					bool r = xbps_verify_file_signature(repo, path);
+					printf("%s: %d\n", path, r);
+				}
 			}
 		}
 	} else {
