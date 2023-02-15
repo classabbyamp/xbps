@@ -368,6 +368,9 @@ fi
 if [ "$CC" = "tcc" ]; then
 	echo "CFLAGS += -Wno-error" >>$CONFIG_MK
 fi
+# openssl3 deprecates several functions used
+# https://github.com/void-linux/xbps/issues/531
+echo "CFLAGS += -Wno-error=deprecated-declarations" >>$CONFIG_MK
 
 # libfetch
 echo "CPPFLAGS +=	-I\$(TOPDIR)/lib/fetch" >>$CONFIG_MK
