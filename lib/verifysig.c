@@ -63,7 +63,10 @@ rsa_verify_hash(struct xbps_repo *repo, xbps_data_t pubkey,
 		return false;
 	}
 
-	rv = RSA_verify(NID_sha1, sha256, SHA256_DIGEST_LENGTH, sig, siglen, rsa);
+	rv = RSA_verify(NID_sha256, sha256, SHA256_DIGEST_LENGTH, sig, siglen, rsa);
+	/* fall back to old, broken behaviour for now */
+	if (rv == 0)
+		rv = RSA_verify(NID_sha1, sha256, SHA256_DIGEST_LENGTH, sig, siglen, rsa);
 	RSA_free(rsa);
 	BIO_free(bio);
 	ERR_free_strings();

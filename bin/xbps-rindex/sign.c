@@ -101,12 +101,7 @@ rsa_sign_file(RSA *rsa, const char *file,
 		return false;
 	}
 
-	/*
-	 * XXX: NID_sha1 is wrong, doesn't make it any weaker
-	 * but the ASN1 is wrong, OpenSSL/LibreSSL doesn't care.
-	 * Other implementations like golang fail because of this.
-	 */
-	if (!RSA_sign(NID_sha1, digest, XBPS_SHA256_DIGEST_SIZE,
+	if (!RSA_sign(NID_sha256, digest, XBPS_SHA256_DIGEST_SIZE,
 				*sigret, siglen, rsa)) {
 		free(*sigret);
 		return false;
