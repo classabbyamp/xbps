@@ -38,3 +38,6 @@ include/xbps.h
 # vim backup files
 .*.swp
 *~
+
+# clangd/bear
+compile_commands.json

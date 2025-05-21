@@ -29,6 +29,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <assert.h>
+#include <endian.h>
+#include <sys/stat.h>
 
 #include <openssl/err.h>
 #include <openssl/sha.h>
@@ -249,20 +251,60 @@ sign_pkg(struct xbps_handle *xhp, const char *binpkg, const char *privkey, bool 
 	RSA *rsa = NULL;
 	unsigned char *sig = NULL;
 	unsigned int siglen = 0;
-	char *sigfile = NULL;
-	int rv = 0, sigfile_fd = -1;
+	char *tname = NULL;
+	int rv = 0, tmp_fd = -1;
+	unsigned char buf[4096];
+	uint32_t i = 0;
+	off_t seek = 0;
+	FILE *tmp_fp = NULL, *binpkg_fp = NULL;
 
-	sigfile = xbps_xasprintf("%s.sig2", binpkg);
-	/*
-	 * Skip pkg if file signature exists
-	 */
-	if (!force && ((sigfile_fd = access(sigfile, R_OK)) == 0)) {
-		if (xhp->flags & XBPS_FLAG_VERBOSE)
-			fprintf(stderr, "skipping %s, file signature found.\n", binpkg);
+	tname = xbps_xasprintf("%s.XXXXXXXXXX", binpkg);
+	assert(tname);
 
-		sigfile_fd = -1;
+	if ((binpkg_fp = fopen(binpkg, "r")) == NULL) {
+		xbps_error_printf("failed to open %s: %s\n", binpkg, strerror(errno));
+		rv = EINVAL;
 		goto out;
 	}
+
+	// Read first 4 bytes of binpkg
+	if (fread(&i, 1, sizeof i, binpkg_fp) != sizeof i) {
+		if (feof(binpkg_fp))
+			xbps_error_printf("failed to read binpkg: reached EOF\n");
+		else if (ferror(binpkg_fp))
+			xbps_error_printf("failed to read binpkg: %s\n", strerror(errno));
+		rv = EINVAL;
+		goto out;
+	}
+	// if it's our skippable frame magic, either seek past it (force) or skip the binpkg (!force)
+	if (le32toh(i) == _FRAME_MAGIC) {
+		if (force) {
+			// read size header
+			if (fread(&i, 1, sizeof i, binpkg_fp) != sizeof i) {
+				if (feof(binpkg_fp))
+					xbps_error_printf("failed to read binpkg: reached EOF\n");
+				else if (ferror(binpkg_fp))
+					xbps_error_printf("failed to read binpkg: %s\n", strerror(errno));
+				rv = EINVAL;
+				goto out;
+			}
+			// magic + header + contents
+			seek = (off_t)i + 8;
+		} else {
+			// Skip pkg if signature exists
+			if (xhp->flags & XBPS_FLAG_VERBOSE)
+				fprintf(stderr, "skipping %s, signature found.\n", binpkg);
+			goto out;
+		}
+	}
+	if (fseeko(binpkg_fp, seek, SEEK_SET) == -1) {
+		xbps_error_printf("failed to seek: %s\n", strerror(errno));
+		rv = EINVAL;
+		goto out;
+	}
+	// TODO: split into library function?
+	// TODO: loop to be able to skip multiple skip frames?
+
 	/*
 	 * Generate pkg file signature.
 	 */
@@ -275,36 +317,94 @@ sign_pkg(struct xbps_handle *xhp, const char *binpkg, const char *privkey, bool 
 	/*
 	 * Write pkg file signature.
 	 */
-	if (force)
-		sigfile_fd = open(sigfile, O_WRONLY|O_TRUNC, 0644);
-	else
-		sigfile_fd = creat(sigfile, 0644);
+	if ((tmp_fd = mkstemp(tname)) == -1) {
+		xbps_error_printf("failed to create temporary file: %s\n", strerror(errno));
+		rv = EINVAL;
+		goto out;
+	}
 
-	if (sigfile_fd == -1) {
-		xbps_error_printf("failed to create %s: %s\n", sigfile, strerror(errno));
+	if ((tmp_fp = fdopen(tmp_fd, "w")) == NULL) {
+		xbps_error_printf("failed to open %s: %s\n", binpkg, strerror(errno));
 		rv = EINVAL;
-		free(sig);
 		goto out;
 	}
-	if (write(sigfile_fd, sig, siglen) != (ssize_t)siglen) {
-		xbps_error_printf("failed to write %s: %s\n", sigfile, strerror(errno));
+
+	i = htole32(_FRAME_MAGIC);
+	if (fwrite(&i, 1, sizeof i, tmp_fp) != sizeof i) {
+		xbps_error_printf("failed to write magic to temporary file: %s\n", strerror(errno));
 		rv = EINVAL;
-		free(sig);
 		goto out;
 	}
-	free(sig);
+
+	if (siglen > (UINT32_MAX - 4)) {
+		xbps_error_printf("signature too long for skippable frame\n");
+		rv = EINVAL;
+		goto out;
+	}
+	i = htole32(siglen + 4);
+	if (fwrite(&i, 1, sizeof i, tmp_fp) != sizeof i) {
+		xbps_error_printf("failed to write length to temporary file: %s\n", strerror(errno));
+		rv = EINVAL;
+		goto out;
+	}
+
+	i = htole32(XBPS_META_SIG2);
+	if (fwrite(&i, 1, sizeof i, tmp_fp) != sizeof i) {
+		xbps_error_printf("failed to write type to temporary file: %s\n", strerror(errno));
+		rv = EINVAL;
+		goto out;
+	}
+
+	if (fwrite(sig, 1, siglen, tmp_fp) != siglen) {
+		xbps_error_printf("failed to write signature to temporary file: %s\n", strerror(errno));
+		rv = EINVAL;
+		goto out;
+	}
+	fflush(tmp_fp);
+
+	while (!feof(binpkg_fp)) {
+		size_t bytes = fread(buf, 1, sizeof buf, binpkg_fp);
+		if (bytes) {
+			if (fwrite(buf, 1, bytes, tmp_fp) != bytes) {
+				xbps_error_printf("failed to write binpkg to temporary file: %s\n", strerror(errno));
+				rv = EINVAL;
+				goto out;
+			}
+		}
+	}
+	fflush(tmp_fp);
+
+	if (fchmod(tmp_fd, 0664) == -1) {
+		xbps_error_printf("failed to chmod temporary file: %s\n", strerror(errno));
+		fclose(tmp_fp);
+		unlink(tname);
+		rv = EINVAL;
+		goto out;
+	}
+	fclose(tmp_fp);
+	tmp_fp = NULL;
+	if (rename(tname, binpkg) == -1) {
+		xbps_error_printf("failed to rename temporary file: %s\n", strerror(errno));
+		unlink(tname);
+		rv = EINVAL;
+		goto out;
+	}
+
 	printf("signed successfully %s\n", binpkg);
 
 out:
+	if (sig)
+		free(sig);
 	if (rsa) {
 		RSA_free(rsa);
 		rsa = NULL;
 	}
-	if (sigfile)
-		free(sigfile);
-	if (sigfile_fd != -1)
-		close(sigfile_fd);
-
+	if (tname)
+		free(tname);
+	if (tmp_fp != NULL)
+		fclose(tmp_fp);
+	if (binpkg_fp != NULL)
+		fclose(binpkg_fp);
 	return rv;
 }
 
